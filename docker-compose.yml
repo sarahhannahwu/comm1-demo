@@ -7,6 +7,8 @@ services:
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:5000}
       ALLOW_REMOTE_PRESENTER: ${ALLOW_REMOTE_PRESENTER:-1}
       CSV_PATH: /app/data/ideas.csv
+      OPENAI_TOKEN: ${OPENAI_TOKEN:?Set OPENAI_TOKEN in your environment}
+      OPENAI_MODEL: ${OPENAI_MODEL:-text-embedding-3-small}
     volumes:
       - ./data:/app/data
     command: sh -c "python aut_live_demo.py --port 5000"

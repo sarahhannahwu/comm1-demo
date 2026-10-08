@@ -12,29 +12,29 @@ Pipeline (mirrors the analysis notebook): embeddings -> L2 normalize ->
           interactive Plotly scatter, colorblind palette, largest cluster starred.
 
 Setup:
-    pip install flask scikit-learn plotly sentence-transformers
-    pip install hdbscan qrcode         # optional: falls back to sklearn's HDBSCAN / no QR
+    pip install -r requirements.txt
 
 Run:
     python aut_live_demo.py                    # live
     python aut_live_demo.py --seed             # preload sample ideas (rehearsal / fallback)
     python aut_live_demo.py --object "paperclip" --min-cluster-size 4 --min-samples 2
 
-Everything runs locally. The sentence-transformers model is downloaded once
-(~90 MB) on first use, so run it once with internet BEFORE the talk. If the
-model isn't available, the script falls back to TF-IDF so the demo never dies.
-All submissions are also appended to ideas.csv as a backup.
+Embeddings are generated through the OpenAI Embeddings API. Set OPENAI_TOKEN
+before starting the app. All submissions are also appended to ideas.csv as a backup.
 """
 import argparse
 import csv
 import html
+import json
 import os
 import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 
 import numpy as np
-from flask import Flask, Response, abort, jsonify, request
+from flask import Flask, Response, jsonify, request
 
 # --------------------------------------------------------------------------
 # State
@@ -45,8 +45,6 @@ LOCK = threading.Lock()
 LAST_PLOT = {"html": "<p style='font-family:sans-serif;padding:2em'>No analysis yet.</p>"}
 CFG = {"object": "bubble wrap", "min_cluster_size": 6, "min_samples": 1,
        "epsilon": 0.25, "csv": "ideas.csv"}
-_MODEL = {"m": None, "failed": False}
-
 SEED_IDEAS = [
     # protection / packaging
     "wrap fragile dishes when moving", "cushion for shipping a laptop",
@@ -82,25 +80,41 @@ SEED_IDEAS = [
 # --------------------------------------------------------------------------
 # Analysis pipeline
 # --------------------------------------------------------------------------
-def _load_model():
-    if _MODEL["m"] is not None or _MODEL["failed"]:
-        return _MODEL["m"]
-    try:
-        from sentence_transformers import SentenceTransformer
-        _MODEL["m"] = SentenceTransformer("all-MiniLM-L6-v2")
-    except Exception as e:  # noqa: BLE001
-        print(f"[warn] sentence-transformers unavailable ({e}); using TF-IDF fallback")
-        _MODEL["failed"] = True
-    return _MODEL["m"]
-
-
 def embed(texts):
-    model = _load_model()
-    if model is not None:
-        return np.asarray(model.encode(texts, normalize_embeddings=True)), "MiniLM sentence embeddings"
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    X = TfidfVectorizer(stop_words="english", ngram_range=(1, 2)).fit_transform(texts).toarray()
-    return X, "TF-IDF (fallback)"
+    token = os.environ.get("OPENAI_TOKEN")
+    model = os.environ.get("OPENAI_MODEL", "text-embedding-3-small")
+    endpoint = os.environ.get(
+        "OPENAI_API_URL",
+        "https://api.openai.com/v1/embeddings",
+    )
+    if not token:
+        raise RuntimeError("OPENAI_TOKEN is required for OpenAI embeddings")
+
+    payload = json.dumps({"input": texts, "model": model}).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            result = json.loads(response.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"OpenAI embeddings failed ({e.code}): {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Could not reach OpenAI embeddings: {e.reason}") from e
+
+    if isinstance(result, dict) and result.get("error"):
+        raise RuntimeError(f"OpenAI embeddings failed: {result['error']}")
+
+    items = result.get("data", [])
+    if len(items) != len(texts) or any("embedding" not in item for item in items):
+        raise RuntimeError("Unexpected OpenAI embeddings response")
+    items = sorted(items, key=lambda item: item.get("index", 0))
+    vectors = np.asarray([item["embedding"] for item in items], dtype=np.float32)
+    return vectors, f"{model} via OpenAI Embeddings API"
 
 
 def get_clusterer():
@@ -270,11 +284,6 @@ def run_analysis(texts):
 app = Flask(__name__)
 
 
-# def #presenter_only():
-#     if request.remote_addr not in ("127.0.0.1", "::1"):
-#         abort(403)
-
-
 AUDIENCE_HTML = """<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Creative uses</title>
@@ -380,20 +389,17 @@ def submit():
 
 @app.get("/present")
 def present():
-    #presenter_only()
-    url = f"http://{app.config['LAN_IP']}:{app.config['PORT']}"
+    url = app.config["PUBLIC_URL"]
     return PRESENTER_HTML.replace("__URL__", url).replace("__QR__", qr_svg(url))
 
 
 @app.get("/ideas")
 def ideas():
-    #presenter_only()
     return jsonify(IDEAS)
 
 
 @app.post("/delete/<int:i>")
 def delete(i):
-    #presenter_only()
     with LOCK:
         IDEAS[:] = [x for x in IDEAS if x["id"] != i]
     return jsonify(ok=True)
@@ -401,7 +407,6 @@ def delete(i):
 
 @app.post("/clear")
 def clear():
-    #presenter_only()
     with LOCK:
         IDEAS.clear()
     return jsonify(ok=True)
@@ -409,7 +414,6 @@ def clear():
 
 @app.post("/analyze")
 def analyze():
-    #presenter_only()
     with LOCK:
         texts = [i["text"] for i in IDEAS]
     if len(texts) < 6:
@@ -425,7 +429,6 @@ def analyze():
 
 @app.get("/plot")
 def plot():
-    #presenter_only()
     return Response(LAST_PLOT["html"], mimetype="text/html")
 
 
@@ -456,10 +459,9 @@ def main():
         for t in SEED_IDEAS:
             IDEAS.append({"id": NEXT_ID[0], "text": t})
             NEXT_ID[0] += 1
-    app.config.update(LAN_IP=lan_ip(), PORT=a.port)
-
-    threading.Thread(target=_load_model, daemon=True).start()  # warm up the model
-    print(f"\n  Audience URL : http://{app.config['LAN_IP']}:{a.port}")
+    public_url = os.environ.get("PUBLIC_URL", f"http://{lan_ip()}:{a.port}").rstrip("/")
+    app.config.update(LAN_IP=lan_ip(), PORT=a.port, PUBLIC_URL=public_url)
+    print(f"\n  Audience URL : {public_url}")
     print(f"  Presenter    : http://localhost:{a.port}/present\n")
     app.run(host="0.0.0.0", port=a.port, threaded=True)
 
