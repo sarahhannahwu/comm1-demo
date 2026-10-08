@@ -94,6 +94,13 @@ def get_connection():
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS analysis_results (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            html TEXT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
     connection.commit()
     return connection
 
@@ -130,6 +137,23 @@ def remove_idea(idea_id):
 def remove_all_ideas():
     with get_connection() as connection:
         connection.execute("DELETE FROM ideas")
+
+
+def save_plot(plot_html):
+    with get_connection() as connection:
+        connection.execute("""
+            INSERT INTO analysis_results (id, html)
+            VALUES (1, %s)
+            ON CONFLICT (id) DO UPDATE SET html = EXCLUDED.html, updated_at = NOW()
+        """, (plot_html,))
+
+
+def load_plot():
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT html FROM analysis_results WHERE id = 1"
+        ).fetchone()
+    return row[0] if row else None
 
 
 def embed(texts):
@@ -468,7 +492,9 @@ def analyze():
     if len(texts) < 6:
         return jsonify(ok=False, error="Need at least 6 ideas")
     try:
-        LAST_PLOT["html"] = run_analysis(texts)
+        plot_html = run_analysis(texts)
+        save_plot(plot_html)
+        LAST_PLOT["html"] = plot_html
     except Exception as e:  # noqa: BLE001
         import traceback
         traceback.print_exc()
@@ -478,7 +504,8 @@ def analyze():
 
 @app.get("/plot")
 def plot():
-    return Response(LAST_PLOT["html"], mimetype="text/html")
+    plot_html = load_plot() or LAST_PLOT["html"]
+    return Response(plot_html, mimetype="text/html")
 
 
 def lan_ip():
