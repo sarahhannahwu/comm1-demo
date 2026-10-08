@@ -1,0 +1,12 @@
+services:
+  aut-demo:
+    build: .
+    ports:
+      - "${HOST_PORT:-5000}:5000"
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:5000}
+      ALLOW_REMOTE_PRESENTER: ${ALLOW_REMOTE_PRESENTER:-1}
+      CSV_PATH: /app/data/ideas.csv
+    volumes:
+      - ./data:/app/data
+    command: sh -c "python aut_live_demo.py --port 5000"
