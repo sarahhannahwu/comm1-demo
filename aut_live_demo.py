@@ -20,10 +20,9 @@ Run:
     python aut_live_demo.py --object "paperclip" --min-cluster-size 4 --min-samples 2
 
 Embeddings are generated through the OpenAI Embeddings API. Set OPENAI_TOKEN
-before starting the app. All submissions are also appended to ideas.csv as a backup.
+before starting the app. Ideas are stored in Postgres.
 """
 import argparse
-import csv
 import html
 import json
 import os
@@ -35,16 +34,15 @@ import urllib.request
 
 import numpy as np
 from flask import Flask, Response, jsonify, request
+import psycopg
 
 # --------------------------------------------------------------------------
 # State
 # --------------------------------------------------------------------------
-IDEAS = []            # list of {"id": int, "text": str}
-NEXT_ID = [0]
 LOCK = threading.Lock()
 LAST_PLOT = {"html": "<p style='font-family:sans-serif;padding:2em'>No analysis yet.</p>"}
 CFG = {"object": "bubble wrap", "min_cluster_size": 6, "min_samples": 1,
-       "epsilon": 0.25, "csv": "ideas.csv"}
+    "epsilon": 0.25}
 SEED_IDEAS = [
     # protection / packaging
     "wrap fragile dishes when moving", "cushion for shipping a laptop",
@@ -80,6 +78,60 @@ SEED_IDEAS = [
 # --------------------------------------------------------------------------
 # Analysis pipeline
 # --------------------------------------------------------------------------
+def database_url():
+    return os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
+
+
+def get_connection():
+    url = database_url()
+    if not url:
+        raise RuntimeError("DATABASE_URL is required for Postgres persistence")
+    connection = psycopg.connect(url)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS ideas (
+            id BIGSERIAL PRIMARY KEY,
+            text TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    connection.commit()
+    return connection
+
+
+def init_database():
+    with get_connection() as connection:
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS ideas (
+                id BIGSERIAL PRIMARY KEY,
+                text TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+
+
+def list_ideas():
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT id, text FROM ideas ORDER BY id"
+        ).fetchall()
+    return [{"id": row[0], "text": row[1]} for row in rows]
+
+
+def add_idea(text):
+    with get_connection() as connection:
+        connection.execute("INSERT INTO ideas (text) VALUES (%s)", (text,))
+
+
+def remove_idea(idea_id):
+    with get_connection() as connection:
+        connection.execute("DELETE FROM ideas WHERE id = %s", (idea_id,))
+
+
+def remove_all_ideas():
+    with get_connection() as connection:
+        connection.execute("DELETE FROM ideas")
+
+
 def embed(texts):
     token = os.environ.get("OPENAI_TOKEN")
     model = os.environ.get("OPENAI_MODEL", "text-embedding-3-small")
@@ -380,10 +432,7 @@ def submit():
     if len(text) < 2:
         return jsonify(ok=False, error="Too short")
     with LOCK:
-        IDEAS.append({"id": NEXT_ID[0], "text": text})
-        NEXT_ID[0] += 1
-        with open(CFG["csv"], "a", newline="") as f:
-            csv.writer(f).writerow([time.strftime("%H:%M:%S"), text])
+        add_idea(text)
     return jsonify(ok=True)
 
 
@@ -395,27 +444,27 @@ def present():
 
 @app.get("/ideas")
 def ideas():
-    return jsonify(IDEAS)
+    return jsonify(list_ideas())
 
 
 @app.post("/delete/<int:i>")
 def delete(i):
     with LOCK:
-        IDEAS[:] = [x for x in IDEAS if x["id"] != i]
+        remove_idea(i)
     return jsonify(ok=True)
 
 
 @app.post("/clear")
 def clear():
     with LOCK:
-        IDEAS.clear()
+        remove_all_ideas()
     return jsonify(ok=True)
 
 
 @app.post("/analyze")
 def analyze():
     with LOCK:
-        texts = [i["text"] for i in IDEAS]
+        texts = [idea["text"] for idea in list_ideas()]
     if len(texts) < 6:
         return jsonify(ok=False, error="Need at least 6 ideas")
     try:
@@ -455,10 +504,10 @@ def main():
 
     CFG.update(object=a.object, min_cluster_size=a.min_cluster_size,
                min_samples=a.min_samples, epsilon=a.epsilon)
+    init_database()
     if a.seed:
         for t in SEED_IDEAS:
-            IDEAS.append({"id": NEXT_ID[0], "text": t})
-            NEXT_ID[0] += 1
+            add_idea(t)
     public_url = os.environ.get("PUBLIC_URL", f"http://{lan_ip()}:{a.port}").rstrip("/")
     app.config.update(LAN_IP=lan_ip(), PORT=a.port, PUBLIC_URL=public_url)
     print(f"\n  Audience URL : {public_url}")

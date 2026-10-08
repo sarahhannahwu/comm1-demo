@@ -6,7 +6,7 @@ services:
     environment:
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:5000}
       ALLOW_REMOTE_PRESENTER: ${ALLOW_REMOTE_PRESENTER:-1}
-      CSV_PATH: /app/data/ideas.csv
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in your environment}
       OPENAI_TOKEN: ${OPENAI_TOKEN:?Set OPENAI_TOKEN in your environment}
       OPENAI_MODEL: ${OPENAI_MODEL:-text-embedding-3-small}
     volumes:
