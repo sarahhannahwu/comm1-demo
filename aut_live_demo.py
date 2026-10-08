@@ -535,7 +535,7 @@ def main():
     if a.seed:
         for t in SEED_IDEAS:
             add_idea(t)
-    public_url = os.environ.get("PUBLIC_URL", f"http://{lan_ip()}:{a.port}").rstrip("/")
+    public_url = "https://comm1-demo.vercel.app/"
     app.config.update(LAN_IP=lan_ip(), PORT=a.port, PUBLIC_URL=public_url)
     print(f"\n  Audience URL : {public_url}")
     print(f"  Presenter    : http://localhost:{a.port}/present\n")
