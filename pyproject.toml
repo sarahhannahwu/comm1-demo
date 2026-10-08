@@ -1,0 +1,2 @@
+[tool.vercel]
+entrypoint = "aut_live_demo:app"
